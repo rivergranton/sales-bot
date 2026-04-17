@@ -32,11 +32,27 @@ def has_admin_role(member: discord.Member) -> bool:
     return any(r.name.lower() in ADMIN_ROLES for r in member.roles)
 
 def get_team(display_name: str):
-    match = re.search(r'[\s_\-]([A-Za-z]+)$', display_name.strip())
+    name = display_name.strip()
+    name_upper = name.upper()
+
+    KEYWORD_MAP = {
+        "AV HOUSE": "AVH", "AVH": "AVH",
+        "DIAMOND DEALERS": "DD", "DD": "DD",
+        "EMPIRE": "EMP", "EMP": "EMP",
+        "FRESH DEALZ": "FD", "FRESH DEALS": "FD", "FD": "FD",
+        "HEALTH HOUNDS": "HH", "HOUNDS": "HH", "HH": "HH",
+        "REDLINE REVENUE": "RR", "REDLINE": "RR", "RR": "RR",
+    }
+    for keyword, key in KEYWORD_MAP.items():
+        if keyword in name_upper:
+            return TEAM_MAP[key]
+
+    match = re.search(r"[\s_\-]([A-Za-z]+)$", name)
     if match:
         suffix = match.group(1).upper()
         if suffix in TEAM_MAP:
             return TEAM_MAP[suffix]
+
     return GOATS
 
 def milestone_emoji(count: int) -> str:
