@@ -1,6 +1,7 @@
 import discord
 import os
 import asyncio
+import re
 from datetime import datetime
 import pytz
 from database import Database
@@ -11,6 +12,8 @@ from stats import build_stats_response
 SALES_CHANNEL = "🥂-general-chat"
 BOARD_CHANNEL = "🥂-sales-scoreboard"
 RESET_HOUR_ET = 0  # midnight Eastern
+
+ADMIN_ROLES = {"~", "admin", "fsl", "sdsl", "dsl", "kevin"}
 
 TEAM_MAP = {
     "AVH": ("🏠 AV House",        "AVH"),
@@ -25,8 +28,10 @@ GOATS = ("🐐 GOATs", "GOAT")
 MILESTONE_EMOJI = {1: "", 2: "✌️", 3: "🎩", 4: "🔥"}
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+def has_admin_role(member: discord.Member) -> bool:
+    return any(r.name.lower() in ADMIN_ROLES for r in member.roles)
+
 def get_team(display_name: str):
-    import re
     match = re.search(r'[\s_\-]([A-Za-z]+)$', display_name.strip())
     if match:
         suffix = match.group(1).upper()
@@ -56,9 +61,9 @@ def build_scoreboard(db: Database) -> str:
     for d in all_deals:
         rep_counts[d["rep_name"]] = rep_counts.get(d["rep_name"], 0) + 1
 
-    all_team_keys  = list(TEAM_MAP.keys()) + ["GOAT"]
-    scored_keys    = {t["team_key"] for t in teams}
-    unscored_keys  = [k for k in all_team_keys if k not in scored_keys]
+    all_team_keys = list(TEAM_MAP.keys()) + ["GOAT"]
+    scored_keys   = {t["team_key"] for t in teams}
+    unscored_keys = [k for k in all_team_keys if k not in scored_keys]
 
     lines = []
     lines.append(f"**📊 Sales Scoreboard — {today}**")
@@ -131,8 +136,10 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # stats commands work in ANY channel
-    content_lower = message.content.lower().strip()
+    content = message.content.strip()
+    content_lower = content.lower()
+
+    # ── stats commands (any channel) ─────────────────────────────────────────
     if content_lower in ("!stats weekly", "!stats week"):
         await message.reply(build_stats_response(db, "weekly"))
         return
@@ -140,6 +147,43 @@ async def on_message(message: discord.Message):
         await message.reply(build_stats_response(db, "monthly"))
         return
 
+    # ── admin correction commands (any channel) ───────────────────────────────
+    if content_lower.startswith("!remove"):
+        if not has_admin_role(message.author):
+            await message.reply("❌ You don't have permission to use that command.")
+            return
+
+        # get mentioned user
+        if not message.mentions:
+            await message.reply("❌ Please tag the rep — example: `!remove @username`")
+            return
+
+        target = message.mentions[0]
+        target_name = target.display_name
+
+        if content_lower.startswith("!removeall"):
+            # remove ALL of target's deals today
+            count = db.delete_all_deals_today(target_name)
+            if count == 0:
+                await message.reply(f"⚠️ No deals found today for **{target_name}**.")
+            else:
+                await message.reply(f"✅ Removed all {count} deal(s) for **{target_name}** today. Scoreboard updated.")
+                await update_scoreboard(message.guild)
+        else:
+            # remove only the most recent deal
+            deal = db.delete_last_deal_today(target_name)
+            if not deal:
+                await message.reply(f"⚠️ No deals found today for **{target_name}**.")
+            else:
+                await message.reply(
+                    f"✅ Removed last deal for **{target_name}** — "
+                    f"{deal['products']} | {format_currency(deal['premium'])}/mo. "
+                    f"Scoreboard updated."
+                )
+                await update_scoreboard(message.guild)
+        return
+
+    # ── sale parsing (sales channel only) ────────────────────────────────────
     if message.channel.name != SALES_CHANNEL:
         return
 
@@ -162,7 +206,6 @@ async def on_message(message: discord.Message):
     )
 
     count = db.get_rep_deal_count_today(display)
-    badge = milestone_emoji(count)
     av    = result["premium"] * 12
 
     confirm = (
@@ -207,10 +250,10 @@ async def midnight_reset():
     et = pytz.timezone("America/New_York")
     while True:
         now        = datetime.now(et)
+        from datetime import timedelta
         next_reset = now.replace(hour=RESET_HOUR_ET, minute=0, second=5, microsecond=0)
         if next_reset <= now:
-            import timedelta
-            next_reset = next_reset + __import__('datetime').timedelta(days=1)
+            next_reset += timedelta(days=1)
         wait_secs = (next_reset - now).total_seconds()
         await asyncio.sleep(wait_secs)
 

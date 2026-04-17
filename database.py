@@ -163,3 +163,24 @@ class Database:
         """, (today_et(),))
         self.conn.execute("DELETE FROM deals WHERE date = ?", (today_et(),))
         self.conn.commit()
+
+    def delete_last_deal_today(self, rep_name: str) -> dict | None:
+        """Delete the most recent deal today for a rep. Returns the deleted deal or None."""
+        row = self.conn.execute("""
+            SELECT id, products, premium FROM deals
+            WHERE date = ? AND rep_name = ?
+            ORDER BY id DESC LIMIT 1
+        """, (today_et(), rep_name)).fetchone()
+        if not row:
+            return None
+        self.conn.execute("DELETE FROM deals WHERE id = ?", (row["id"],))
+        self.conn.commit()
+        return dict(row)
+
+    def delete_all_deals_today(self, rep_name: str) -> int:
+        """Delete all of a rep's deals today. Returns count deleted."""
+        cur = self.conn.execute("""
+            DELETE FROM deals WHERE date = ? AND rep_name = ?
+        """, (today_et(), rep_name))
+        self.conn.commit()
+        return cur.rowcount
