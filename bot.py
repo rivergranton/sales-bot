@@ -2,7 +2,7 @@ import discord
 import os
 import asyncio
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from database import Database
 from parser import parse_sale
@@ -250,7 +250,7 @@ async def midnight_reset():
     et = pytz.timezone("America/New_York")
     while True:
         now        = datetime.now(et)
-        from datetime import timedelta
+
         next_reset = now.replace(hour=RESET_HOUR_ET, minute=0, second=5, microsecond=0)
         if next_reset <= now:
             next_reset += timedelta(days=1)
