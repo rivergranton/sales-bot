@@ -199,6 +199,80 @@ async def on_message(message: discord.Message):
                 await update_scoreboard(message.guild)
         return
 
+    # ── !refreshscoreboard (any channel, admin only) ─────────────────────────
+    if content_lower in ("!refreshscoreboard", "!refresh"):
+        if not has_admin_role(message.author):
+            await message.reply("❌ You don't have permission to use that command.")
+            return
+        await update_scoreboard(message.guild)
+        await message.reply("✅ Scoreboard refreshed!")
+        return
+
+    # ── !add (manual entry, admin only) ──────────────────────────────────────
+    if content_lower.startswith("!add "):
+        if not has_admin_role(message.author):
+            await message.reply("❌ You don't have permission to use that command.")
+            return
+
+        if not message.mentions:
+            await message.reply("❌ Please tag the rep — example: `!add @username $532 SA 20MG Diamond`")
+            return
+
+        target      = message.mentions[0]
+        target_name = target.display_name
+
+        # strip the "!add @mention " prefix to get just the sale text
+        # message.content after mentions looks like "!add @username $532SA..."
+        # we remove the command and the mention to isolate the sale string
+        sale_text = re.sub(r'<@!?\d+>', '', content).replace('!add', '').strip()
+
+        if not sale_text:
+            await message.reply("❌ No sale info found — example: `!add @username $532 SA 20MG Diamond`")
+            return
+
+        result = await parse_sale(sale_text)
+        if not result:
+            await message.reply(f"❌ Couldn't parse that sale. Try: `!add @{target_name} $532 SA 20MG Diamond`")
+            return
+
+        team_info = get_team(target_name)
+        team_name, team_key = team_info
+
+        db.insert_deal(
+            rep_name    = target_name,
+            team_name   = team_name,
+            team_key    = team_key,
+            products    = result["products"],
+            premium     = result["premium"],
+            association = result.get("association", ""),
+            deal_tags   = result.get("deal_tags", ""),
+        )
+
+        count = db.get_rep_deal_count_today(target_name)
+        badge = milestone_emoji(count)
+        av    = result["premium"] * 12
+
+        confirm = (
+            f"✅ Manually logged! **{format_currency(result['premium'])} {result['products']}** "
+            f"for **{target_name}** → {team_name}"
+        )
+        if result.get("association"):
+            confirm += f" · {result['association']}"
+        if result.get("deal_tags"):
+            confirm += f" · {result['deal_tags']}"
+        confirm += f"\nPremium: {format_currency(result['premium'])}/mo · AV: {format_currency(av)}"
+
+        if count == 2:
+            confirm += f"\n✌️ Double down {target_name}! 2 policies today!"
+        elif count == 3:
+            confirm += f"\n🎩 Hat trick {target_name}! 3 policies today!"
+        elif count >= 4:
+            confirm += f"\n🔥 {target_name} is ON FIRE! {count} policies today!"
+
+        await message.reply(confirm)
+        await update_scoreboard(message.guild)
+        return
+
     # ── sale parsing (sales channel only) ────────────────────────────────────
     if message.channel.name != SALES_CHANNEL:
         return
