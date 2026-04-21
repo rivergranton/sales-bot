@@ -4,7 +4,6 @@ from datetime import datetime
 import pytz
 
 DB_PATH = os.environ.get("DB_PATH", "sales.db")
-
 ET = pytz.timezone("America/New_York")
 
 def today_et() -> str:
@@ -42,6 +41,25 @@ class Database:
                 association TEXT    DEFAULT '',
                 deal_tags   TEXT    DEFAULT '',
                 created_at  TEXT    NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_summaries (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                date        TEXT    NOT NULL,
+                team_key    TEXT    NOT NULL,
+                team_name   TEXT    NOT NULL,
+                total_av    REAL    NOT NULL DEFAULT 0,
+                deal_count  INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_rep_summaries (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                date        TEXT    NOT NULL,
+                rep_name    TEXT    NOT NULL,
+                team_key    TEXT    NOT NULL,
+                team_name   TEXT    NOT NULL,
+                total_av    REAL    NOT NULL DEFAULT 0,
+                deal_count  INTEGER NOT NULL DEFAULT 0
             );
         """)
         self.conn.commit()
@@ -107,12 +125,15 @@ class Database:
 
     # ── historical queries ────────────────────────────────────────────────────
 
+    def _all_deals(self):
+        return "(SELECT * FROM deals UNION ALL SELECT * FROM archived_deals)"
+
     def get_team_totals_week(self) -> list[dict]:
-        rows = self.conn.execute("""
+        rows = self.conn.execute(f"""
             SELECT team_name, team_key,
                    SUM(premium) * 12 AS total_av,
                    COUNT(*)          AS deal_count
-            FROM   (SELECT * FROM deals UNION ALL SELECT * FROM archived_deals)
+            FROM   {self._all_deals()}
             WHERE  date >= date('now', '-6 days', 'localtime')
             GROUP  BY team_key
             ORDER  BY total_av DESC
@@ -120,23 +141,51 @@ class Database:
         return [dict(r) for r in rows]
 
     def get_team_totals_month(self) -> list[dict]:
-        rows = self.conn.execute("""
+        rows = self.conn.execute(f"""
             SELECT team_name, team_key,
                    SUM(premium) * 12 AS total_av,
                    COUNT(*)          AS deal_count
-            FROM   (SELECT * FROM deals UNION ALL SELECT * FROM archived_deals)
+            FROM   {self._all_deals()}
             WHERE  strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
             GROUP  BY team_key
             ORDER  BY total_av DESC
         """).fetchall()
         return [dict(r) for r in rows]
 
-    def get_rep_totals_week(self) -> list[dict]:
-        rows = self.conn.execute("""
+    def get_rep_totals_for_team_week(self, team_key: str) -> list[dict]:
+        rows = self.conn.execute(f"""
             SELECT rep_name, team_name,
                    SUM(premium) * 12 AS total_av,
                    COUNT(*)          AS deal_count
-            FROM   (SELECT * FROM deals UNION ALL SELECT * FROM archived_deals)
+            FROM   {self._all_deals()}
+            WHERE  date >= date('now', '-6 days', 'localtime')
+              AND  team_key = ?
+            GROUP  BY rep_name
+            ORDER  BY total_av DESC
+            LIMIT  10
+        """, (team_key,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_rep_totals_for_team_month(self, team_key: str) -> list[dict]:
+        rows = self.conn.execute(f"""
+            SELECT rep_name, team_name,
+                   SUM(premium) * 12 AS total_av,
+                   COUNT(*)          AS deal_count
+            FROM   {self._all_deals()}
+            WHERE  strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
+              AND  team_key = ?
+            GROUP  BY rep_name
+            ORDER  BY total_av DESC
+            LIMIT  10
+        """, (team_key,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_rep_totals_week(self) -> list[dict]:
+        rows = self.conn.execute(f"""
+            SELECT rep_name, team_name, team_key,
+                   SUM(premium) * 12 AS total_av,
+                   COUNT(*)          AS deal_count
+            FROM   {self._all_deals()}
             WHERE  date >= date('now', '-6 days', 'localtime')
             GROUP  BY rep_name
             ORDER  BY total_av DESC
@@ -144,28 +193,18 @@ class Database:
         return [dict(r) for r in rows]
 
     def get_rep_totals_month(self) -> list[dict]:
-        rows = self.conn.execute("""
-            SELECT rep_name, team_name,
+        rows = self.conn.execute(f"""
+            SELECT rep_name, team_name, team_key,
                    SUM(premium) * 12 AS total_av,
                    COUNT(*)          AS deal_count
-            FROM   (SELECT * FROM deals UNION ALL SELECT * FROM archived_deals)
+            FROM   {self._all_deals()}
             WHERE  strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
             GROUP  BY rep_name
             ORDER  BY total_av DESC
         """).fetchall()
         return [dict(r) for r in rows]
 
-    def archive_today(self):
-        """Move today's deals into archived_deals at midnight."""
-        self.conn.execute("""
-            INSERT INTO archived_deals
-            SELECT * FROM deals WHERE date = ?
-        """, (today_et(),))
-        self.conn.execute("DELETE FROM deals WHERE date = ?", (today_et(),))
-        self.conn.commit()
-
     def delete_last_deal_today(self, rep_name: str) -> dict | None:
-        """Delete the most recent deal today for a rep. Returns the deleted deal or None."""
         row = self.conn.execute("""
             SELECT id, products, premium FROM deals
             WHERE date = ? AND rep_name = ?
@@ -178,9 +217,60 @@ class Database:
         return dict(row)
 
     def delete_all_deals_today(self, rep_name: str) -> int:
-        """Delete all of a rep's deals today. Returns count deleted."""
         cur = self.conn.execute("""
             DELETE FROM deals WHERE date = ? AND rep_name = ?
         """, (today_et(), rep_name))
         self.conn.commit()
         return cur.rowcount
+
+    def save_daily_summaries(self):
+        """Save today's team and rep totals before archiving."""
+        date = today_et()
+
+        # delete any existing summaries for today (in case called twice)
+        self.conn.execute("DELETE FROM daily_summaries WHERE date = ?", (date,))
+        self.conn.execute("DELETE FROM daily_rep_summaries WHERE date = ?", (date,))
+
+        # save team totals
+        teams = self.conn.execute("""
+            SELECT team_name, team_key,
+                   SUM(premium) * 12 AS total_av,
+                   COUNT(*) AS deal_count
+            FROM deals WHERE date = ?
+            GROUP BY team_key
+        """, (date,)).fetchall()
+
+        for t in teams:
+            self.conn.execute("""
+                INSERT INTO daily_summaries (date, team_key, team_name, total_av, deal_count)
+                VALUES (?, ?, ?, ?, ?)
+            """, (date, t["team_key"], t["team_name"], t["total_av"], t["deal_count"]))
+
+        # save rep totals
+        reps = self.conn.execute("""
+            SELECT rep_name, team_key, team_name,
+                   SUM(premium) * 12 AS total_av,
+                   COUNT(*) AS deal_count
+            FROM deals WHERE date = ?
+            GROUP BY rep_name
+        """, (date,)).fetchall()
+
+        for r in reps:
+            self.conn.execute("""
+                INSERT INTO daily_rep_summaries
+                (date, rep_name, team_key, team_name, total_av, deal_count)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (date, r["rep_name"], r["team_key"], r["team_name"],
+                  r["total_av"], r["deal_count"]))
+
+        self.conn.commit()
+
+    def archive_today(self):
+        """Save summaries then move today's deals to archived_deals."""
+        self.save_daily_summaries()
+        self.conn.execute("""
+            INSERT INTO archived_deals
+            SELECT * FROM deals WHERE date = ?
+        """, (today_et(),))
+        self.conn.execute("DELETE FROM deals WHERE date = ?", (today_et(),))
+        self.conn.commit()
